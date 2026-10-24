@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { GithubService } from './github.service';
 import { AiService } from '../ai/ai.service';
 
@@ -10,27 +10,62 @@ export class GithubController {
   ) {}
 
   @Post('webhook')
-  handleGitHubWebhook(@Body() payload: any) {
-    if (
-      payload.action !== 'completed' ||
-      payload.workflow_run?.conclusion !== 'failure'
-    ) {
-      return;
+  async handleGitHubWebhook(@Body() payload: any) {
+    if (payload.action !== 'completed') {
+      return { ignored: true, reason: 'Action not completed' };
     }
 
-    const runId = payload.workflow_run.id;
-    const [owner, repo] = payload.repository.full_name.split('/');
+    const conclusion = payload.workflow_run?.conclusion;
+    const runId = payload.workflow_run?.id;
+    const [owner, repo] = payload.repository?.full_name?.split('/') || [];
+    const workflowName = payload.workflow_run?.name;
 
-    const res = this.aiService.aiInvestigator(owner, repo, String(runId));
-    console.log(res);
+    if (!owner || !repo || !runId) {
+      return { ignored: true, reason: 'Missing owner, repo, or runId' };
+    }
+
+    if (conclusion === 'failure') {
+      console.log(
+        `[Webhook] Investigating failure for run #${runId} (${owner}/${repo})...`,
+      );
+      const res = await this.aiService.aiInvestigator(
+        owner,
+        repo,
+        String(runId),
+      );
+      console.log(
+        `[Webhook] Failure investigation completed for run #${runId}`,
+      );
+      return res;
+    }
+
+    if (conclusion === 'success') {
+      console.log(
+        `[Webhook] Saving success run #${runId} (${owner}/${repo})...`,
+      );
+      const summary = workflowName
+        ? `Workflow "${workflowName}" completed successfully with all jobs passing.`
+        : 'Workflow completed successfully with all jobs passing.';
+      const res = await this.aiService.saveSuccessRun(
+        owner,
+        repo,
+        String(runId),
+        summary,
+      );
+      console.log(`[Webhook] Success run #${runId} saved`);
+      return res;
+    }
+
+    return { ignored: true, reason: `Ignored conclusion: ${conclusion}` };
   }
 
   @Get('workflow-runs/:owner/:repo')
   async listWorkflowRuns(
     @Param('owner') owner: string,
     @Param('repo') repo: string,
+    @Query('status') status?: string,
   ) {
-    return this.githubService.listWorkflowRuns(owner, repo);
+    return this.githubService.listWorkflowRuns(owner, repo, status);
   }
 
   @Get('workflow-run/:owner/:repo/:run_id')
@@ -76,5 +111,25 @@ export class GithubController {
     @Param('job_id') job_id: string,
   ) {
     return this.githubService.getJobLogs(owner, repo, job_id);
+  }
+}
+
+@Controller('repos')
+export class GithubReposController {
+  constructor(private readonly githubService: GithubService) {}
+
+  @Post(':owner/:repo/actions/workflows/:workflow_id/dispatches')
+  async dispatchWorkflow(
+    @Param('owner') owner: string,
+    @Param('repo') repo: string,
+    @Param('workflow_id') workflow_id: string,
+    @Body('ref') ref?: string,
+  ) {
+    return this.githubService.dispatchWorkflow(
+      owner,
+      repo,
+      workflow_id,
+      ref || 'main',
+    );
   }
 }

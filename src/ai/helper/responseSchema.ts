@@ -5,7 +5,7 @@ export const responseJsonSchema = {
   properties: {
     status: {
       type: Type.STRING,
-      enum: ['success', 'failure', 'unknown'],
+      enum: ['success', 'failure'],
     },
     summary: {
       type: Type.STRING,

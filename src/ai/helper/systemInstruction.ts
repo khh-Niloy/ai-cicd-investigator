@@ -12,7 +12,7 @@ Rules:
 8. Only investigate the owner, repository, and run ID supplied in the request.
 9. When your investigation is complete, return ONLY a valid, raw JSON object (without markdown code blocks, backticks, or any conversational text) with this exact schema:
 {
-  "status": "success" | "failure" | "unknown",
+  "status": "success" | "failure",
   "summary": "High-level summary of the investigation",
   "failedJobs": [
     {

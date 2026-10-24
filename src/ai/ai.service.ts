@@ -132,10 +132,10 @@ export class AiService {
     console.log(jsonResult);
 
     // Sanitize and normalize fields based on existing schema
-    const validStatuses = ['success', 'failure', 'unknown'];
+    const validStatuses = ['success', 'failure'];
     const status = validStatuses.includes(jsonResult.status)
       ? jsonResult.status
-      : 'unknown';
+      : 'failure';
     const summary =
       jsonResult.summary || 'Investigation completed without summary';
     const failedJobs = Array.isArray(jsonResult.failedJobs)
@@ -178,6 +178,51 @@ export class AiService {
         _persisted: false,
         _persistenceError:
           'Investigation completed, but could not be saved to MongoDB. Please verify MONGODB_URI.',
+      };
+    }
+  }
+
+  async saveSuccessRun(
+    owner: string,
+    repo: string,
+    runId: string,
+    summary?: string,
+  ) {
+    const finalSummary =
+      summary || 'Workflow completed successfully with all jobs passing.';
+    try {
+      const savedDoc = await this.investigationModel.findOneAndUpdate(
+        {
+          owner: owner.trim(),
+          repo: repo.trim(),
+          runId: String(runId).trim(),
+        },
+        {
+          owner: owner.trim(),
+          repo: repo.trim(),
+          runId: String(runId).trim(),
+          status: 'success',
+          summary: finalSummary,
+          failedJobs: [],
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+
+      this.logger.log(`Persisted success run: ${savedDoc._id}`);
+      return savedDoc.toObject ? savedDoc.toObject() : savedDoc;
+    } catch (dbError: any) {
+      this.logger.error(
+        'Database persistence error for success run:',
+        dbError?.message || dbError,
+      );
+      return {
+        owner,
+        repo,
+        runId: String(runId),
+        status: 'success',
+        summary: finalSummary,
+        failedJobs: [],
+        _persisted: false,
       };
     }
   }

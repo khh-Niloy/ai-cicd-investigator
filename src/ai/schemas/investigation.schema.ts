@@ -3,7 +3,7 @@ import { HydratedDocument } from 'mongoose';
 
 export type InvestigationDocument = HydratedDocument<Investigation>;
 
-export type InvestigationStatus = 'success' | 'failure' | 'unknown';
+export type InvestigationStatus = 'success' | 'failure';
 
 @Schema({ _id: false })
 export class FailedJob {
@@ -38,8 +38,8 @@ export class Investigation {
 
   @Prop({
     required: true,
-    enum: ['success', 'failure', 'unknown'],
-    default: 'unknown',
+    enum: ['success', 'failure'],
+    default: 'failure',
   })
   status: InvestigationStatus;
 
