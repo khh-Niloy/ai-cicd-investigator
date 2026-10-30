@@ -5,6 +5,7 @@ import {
   FunctionCallingConfigMode,
   GoogleGenAI,
   GenerateContentConfig,
+  GenerateContentResponse,
 } from '@google/genai';
 import { systemInstruction } from './helper/systemInstruction';
 import { githubTools } from './tools/github.tools';
@@ -19,6 +20,12 @@ import {
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
+  private readonly maxToolIterations =
+    Number(process.env.MAX_TOOL_ITERATIONS) || 10;
+  private readonly aiCallTimeoutMs = 20_000; // 20s timeout per Gemini API call
+  private readonly totalTimeoutMs = 90_000; // 90s total timeout for investigation
+  private readonly primaryModel = process.env.PRIMARY_MODEL!;
+  private readonly fallbackModel = process.env.FALLBACK_MODEL!;
 
   constructor(
     private readonly toolExecutorService: ToolExecutorService,
@@ -34,7 +41,10 @@ export class AiService {
       );
     }
 
-    const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const client = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: { timeout: this.aiCallTimeoutMs },
+    });
     const intiContent = userQuery(owner, repo, run_id);
 
     const contents: Content[] = [
@@ -43,6 +53,8 @@ export class AiService {
         parts: [{ text: intiContent }],
       },
     ];
+
+    const abortSignal = AbortSignal.timeout(this.totalTimeoutMs);
 
     const config: GenerateContentConfig = {
       systemInstruction: systemInstruction,
@@ -57,56 +69,155 @@ export class AiService {
         },
       },
       temperature: 0.1,
+      httpOptions: { timeout: this.aiCallTimeoutMs },
+      abortSignal,
     };
 
-    const model = 'gemini-3.5-flash-lite';
+    let activeModel = this.primaryModel;
 
-    let result = await client.models.generateContent({
-      model,
-      config,
-      contents,
-    });
+    const generateWithFallback = async (
+      callConfig: GenerateContentConfig,
+    ): Promise<GenerateContentResponse> => {
+      try {
+        return await client.models.generateContent({
+          model: activeModel,
+          config: callConfig,
+          contents,
+        });
+      } catch (error: any) {
+        if (
+          abortSignal.aborted ||
+          error?.name === 'AbortError' ||
+          activeModel === this.fallbackModel
+        ) {
+          throw error;
+        }
 
-    while (result.functionCalls?.length) {
-      this.logger.log('Gemini requested a tool call');
+        this.logger.warn(
+          `Primary model (${activeModel}) failed (${error?.message || error}). Switching to fallback model (${this.fallbackModel})...`,
+        );
+        activeModel = this.fallbackModel;
 
-      contents.push({
-        role: 'model',
-        parts: result.candidates?.[0]?.content?.parts ?? [],
-      });
+        return await client.models.generateContent({
+          model: activeModel,
+          config: callConfig,
+          contents,
+        });
+      }
+    };
 
-      for (const call of result.functionCalls) {
-        if (!call.name) continue;
+    let result: GenerateContentResponse;
+    let iterationCount = 0;
 
-        const toolResult = await this.toolExecutorService.executeTool(
-          call.name,
-          (call.args ?? {}) as Record<string, any>,
+    try {
+      // It gives the very first tool (or set of tools) Gemini needs to start the investigation.
+      result = await generateWithFallback(config);
+
+      while (result.functionCalls?.length) {
+        if (iterationCount >= this.maxToolIterations) {
+          this.logger.warn(
+            `Reached maximum tool call iterations (${this.maxToolIterations}). Halting tool calls.`,
+          );
+          break;
+        }
+
+        if (abortSignal.aborted) {
+          throw new HttpException(
+            `AI investigation timed out after ${this.totalTimeoutMs / 1000} seconds`,
+            HttpStatus.GATEWAY_TIMEOUT,
+          );
+        }
+
+        iterationCount++;
+        this.logger.log(
+          `Gemini requested tool call(s) (iteration ${iterationCount}/${this.maxToolIterations})`,
         );
 
+        contents.push({
+          role: 'model',
+          parts: result.candidates?.[0]?.content?.parts ?? [],
+        });
+
+        for (const call of result.functionCalls) {
+          if (!call.name) continue;
+
+          const toolResult = await this.toolExecutorService.executeTool(
+            call.name,
+            (call.args ?? {}) as Record<string, any>,
+          );
+
+          contents.push({
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: call.name,
+                  response: {
+                    result: toolResult,
+                  },
+                },
+              },
+            ],
+          });
+        }
+
+        //  Gemini analyzes the tool results and either:a. Calls more tools (if it needs more info).b. Generates the final response (if it has enough).
+        result = await generateWithFallback(config);
+      }
+
+      // If loop exited because of reaching max iterations without a final text response, request synthesis without tools
+      if (!result.text && iterationCount >= this.maxToolIterations) {
+        this.logger.log(
+          'Tool iteration limit reached; requesting final JSON summary without tools...',
+        );
         contents.push({
           role: 'user',
           parts: [
             {
-              functionResponse: {
-                name: call.name,
-                response: {
-                  result: toolResult,
-                },
-              },
+              text: 'Maximum tool call iterations reached. Provide your final investigation report in the required JSON format now based on the information gathered so far without making further tool calls.',
             },
           ],
         });
+
+        result = await generateWithFallback({
+          ...config,
+          toolConfig: {
+            functionCallingConfig: {
+              mode: FunctionCallingConfigMode.NONE,
+            },
+          },
+        });
       }
-      result = await client.models.generateContent({
-        model,
-        config,
-        contents,
-      });
+    } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      if (
+        error?.name === 'AbortError' ||
+        error?.name === 'TimeoutError' ||
+        abortSignal.aborted ||
+        error?.message?.toLowerCase().includes('timeout') ||
+        error?.message?.toLowerCase().includes('aborted')
+      ) {
+        this.logger.error(
+          `AI investigation timed out after ${this.totalTimeoutMs / 1000} seconds`,
+        );
+        throw new HttpException(
+          `AI investigation timed out after ${this.totalTimeoutMs / 1000} seconds`,
+          HttpStatus.GATEWAY_TIMEOUT,
+        );
+      }
+
+      this.logger.error('Error during AI generation:', error?.message || error);
+      throw error;
     }
 
     if (!result.text) {
       throw new HttpException(
-        'No response text returned from Gemini model',
+        iterationCount >= this.maxToolIterations
+          ? `Maximum tool call iterations (${this.maxToolIterations}) reached without generating a final response`
+          : 'No response text returned from Gemini model',
         HttpStatus.BAD_GATEWAY,
       );
     }

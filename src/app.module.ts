@@ -1,10 +1,13 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
+import { BullModule } from '@nestjs/bullmq';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { GithubModule } from './github/github.module';
 import { AiModule } from './ai/ai.module';
+import { QueuesModule } from './queues/queues.module';
+import { WorkersModule } from './workers/workers.module';
 
 @Module({
   imports: [
@@ -27,6 +30,19 @@ import { AiModule } from './ai/ai.module';
         };
       },
     }),
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        connection: {
+          host: configService.get<string>('REDIS_HOST') || '127.0.0.1',
+          port: Number(configService.get<number>('REDIS_PORT')) || 6379,
+          password: configService.get<string>('REDIS_PASSWORD') || undefined,
+        },
+      }),
+    }),
+    QueuesModule,
+    WorkersModule,
     GithubModule,
     AiModule,
   ],

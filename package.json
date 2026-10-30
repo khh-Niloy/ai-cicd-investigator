@@ -21,11 +21,14 @@
   },
   "dependencies": {
     "@google/genai": "^2.30.0",
+    "@nestjs/bullmq": "^12.0.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
     "@nestjs/mongoose": "^11.0.4",
     "@nestjs/platform-express": "^11.0.1",
+    "bullmq": "^6.5.1",
+    "ioredis": "^6.0.0",
     "mongoose": "^9.11.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
