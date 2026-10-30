@@ -1,16 +1,37 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+  Res,
+} from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import type { Response } from 'express';
 import { GithubService } from './github.service';
 import { AiService } from '../ai/ai.service';
+import {
+  INVESTIGATION_QUEUE_NAME,
+  InvestigationJobData,
+} from '../queues/investigation.queue';
 
 @Controller('github')
 export class GithubController {
   constructor(
     private readonly githubService: GithubService,
     private readonly aiService: AiService,
+    @InjectQueue(INVESTIGATION_QUEUE_NAME)
+    private readonly investigationQueue: Queue<InvestigationJobData>,
   ) {}
 
   @Post('webhook')
-  async handleGitHubWebhook(@Body() payload: any) {
+  async handleGitHubWebhook(
+    @Body() payload: any,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     if (payload.action !== 'completed') {
       return { ignored: true, reason: 'Action not completed' };
     }
@@ -26,17 +47,42 @@ export class GithubController {
 
     if (conclusion === 'failure') {
       console.log(
-        `[Webhook] Investigating failure for run #${runId} (${owner}/${repo})...`,
+        `[Webhook] Enqueuing failure investigation for run #${runId} (${owner}/${repo})...`,
       );
-      const res = await this.aiService.aiInvestigator(
+
+      const job = await this.investigationQueue.add(
+        'investigate-failure',
+        {
+          owner,
+          repo,
+          runId: String(runId),
+          workflowName,
+        },
+        {
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 5000,
+          },
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
+      );
+
+      console.log(
+        `[Webhook] Investigation job #${job.id} enqueued for run #${runId}`,
+      );
+
+      res.status(HttpStatus.ACCEPTED);
+      return {
+        status: 'queued',
+        statusCode: HttpStatus.ACCEPTED,
+        message: `Investigation job #${job.id} enqueued in Redis queue for run #${runId}`,
+        jobId: job.id,
+        runId,
         owner,
         repo,
-        String(runId),
-      );
-      console.log(
-        `[Webhook] Failure investigation completed for run #${runId}`,
-      );
-      return res;
+      };
     }
 
     if (conclusion === 'success') {
