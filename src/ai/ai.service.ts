@@ -16,6 +16,7 @@ import {
   Investigation,
   InvestigationDocument,
 } from './schemas/investigation.schema';
+import { investigationResponseZodSchema } from './helper/responseSchema';
 
 @Injectable()
 export class AiService {
@@ -45,12 +46,12 @@ export class AiService {
       apiKey: process.env.GEMINI_API_KEY,
       httpOptions: { timeout: this.aiCallTimeoutMs },
     });
-    const intiContent = userQuery(owner, repo, run_id);
+    const initContent = userQuery(owner, repo, run_id);
 
     const contents: Content[] = [
       {
         role: 'user',
-        parts: [{ text: intiContent }],
+        parts: [{ text: initContent }],
       },
     ];
 
@@ -240,24 +241,22 @@ export class AiService {
       );
     }
 
-    console.log(jsonResult);
+    const validationResult =
+      investigationResponseZodSchema.safeParse(jsonResult);
+    if (!validationResult.success) {
+      this.logger.error(
+        'AI response failed Zod schema validation:',
+        validationResult.error.format(),
+      );
+      throw new HttpException(
+        `AI response failed schema validation: ${validationResult.error.issues
+          .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+          .join(', ')}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
 
-    // Sanitize and normalize fields based on existing schema
-    const validStatuses = ['success', 'failure'];
-    const status = validStatuses.includes(jsonResult.status)
-      ? jsonResult.status
-      : 'failure';
-    const summary =
-      jsonResult.summary || 'Investigation completed without summary';
-    const failedJobs = Array.isArray(jsonResult.failedJobs)
-      ? jsonResult.failedJobs.map((job: any) => ({
-          jobId: String(job.jobId || ''),
-          jobName: String(job.jobName || 'Unknown Job'),
-          rootCause: String(job.rootCause || 'Root cause not determined'),
-          evidence: String(job.evidence || ''),
-          recommendedFix: String(job.recommendedFix || 'No fix suggested'),
-        }))
-      : [];
+    const { status, summary, failedJobs } = validationResult.data;
 
     // Persist investigation to MongoDB
     try {
