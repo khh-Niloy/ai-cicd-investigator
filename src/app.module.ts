@@ -33,13 +33,23 @@ import { WorkersModule } from './workers/workers.module';
     BullModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        connection: {
-          host: configService.get<string>('REDIS_HOST') || '127.0.0.1',
-          port: Number(configService.get<number>('REDIS_PORT')) || 6379,
-          password: configService.get<string>('REDIS_PASSWORD') || undefined,
-        },
-      }),
+      useFactory: (configService: ConfigService) => {
+        const redisUrl = configService.get<string>('REDIS_URL');
+        if (redisUrl) {
+          return {
+            connection: {
+              url: redisUrl,
+            },
+          };
+        }
+        return {
+          connection: {
+            host: configService.get<string>('REDIS_HOST') || '127.0.0.1',
+            port: Number(configService.get<number>('REDIS_PORT')) || 6379,
+            password: configService.get<string>('REDIS_PASSWORD') || undefined,
+          },
+        };
+      },
     }),
     QueuesModule,
     WorkersModule,
